@@ -1,0 +1,28 @@
+# General Configuration
+PROJECT_NAME           = "TCP Project"
+OUTPUT_DIRECTORY       = .
+INPUT                  = /home/david/esp/idf/components/lwip/lwip/src/core/tcp.c
+FILE_PATTERNS          = *.c
+RECURSIVE              = NO
+
+# Generate XML Output
+GENERATE_XML           = YES
+XML_OUTPUT             = xml
+
+# Documentation Settings
+EXTRACT_ALL            = YES
+EXTRACT_PRIVATE        = NO
+EXTRACT_STATIC         = YES
+
+# Additional Options
+FULL_PATH_NAMES        = NO
+STRIP_FROM_PATH        = .
+ENABLE_PREPROCESSING   = NO
+MACRO_EXPANSION        = NO
+EXPAND_ONLY_PREDEF     = NO
+XML_PROGRAMLISTING     = NO
+HAVE_DOT               = NO
+GENERATE_HTML          = NO
+GENERATE_LATEX         = NO
+# Comment Parsing
+ALIASES        
