@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 
 import os
-import asyncio
 import json
 from typing import Any, Dict, Optional
 from datetime import datetime
 
-import aiohttp
+from openai import OpenAI
 from dotenv import load_dotenv
 
 from system_prompt import system_prompt
@@ -23,7 +22,19 @@ API_KEY = os.getenv("API_KEY")
 BASE_URL = os.getenv("BASE_URL", "https://api.openai.com/v1")
 MODEL = os.getenv("MODEL", "gpt-4o-mini")
 
-async def get_model() -> Dict[str, Any]:
+def create_openai_client():
+    """
+    Creates an OpenAI client using environment variables.
+
+    Returns:
+        OpenAI client instance
+    """
+    return OpenAI(
+        api_key=API_KEY,
+        base_url=BASE_URL
+    )
+
+def get_model() -> Dict[str, Any]:
     """
     Returns the model configuration to use for LLM requests.
 
@@ -39,7 +50,7 @@ async def get_model() -> Dict[str, Any]:
         "endpoint": BASE_URL
     }
 
-async def generate_with_schema(
+def generate_with_schema(
     model: Dict[str, Any],
     prompt: str,
     schema: Dict[str, Any],
@@ -58,44 +69,85 @@ async def generate_with_schema(
         Parsed JSON object matching the schema
     """
     model_id = model.get("modelId", MODEL)
-    endpoint = model.get("endpoint", BASE_URL)
 
-    # Prepare headers for API request
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {API_KEY}"
-    }
+    # Create OpenAI client
+    client = create_openai_client()
 
-    # Prepare request payload
-    payload = {
-        "model": model_id,
-        "messages": [
-            {"role": "system", "content": system_prompt()},
-            {"role": "user", "content": prompt}
-        ],
-        "temperature": temperature,
-        "response_format": {"type": "json_object", "schema": schema}
-    }
+    # Prepare request
+    messages = [
+        {"role": "system", "content": system_prompt() + "\nPlease format your response as JSON, **exactly** according to the provided schema."},
+        {"role": "user", "content": prompt + f"\n\nRespond using JSON format with this schema provided\n {schema}"}
+    ]
 
     # Make API request
-    async with aiohttp.ClientSession() as session:
-        async with session.post(
-            f"{endpoint}/chat/completions",
-            headers=headers,
-            json=payload
-        ) as response:
-            if response.status != 200:
-                raise Exception(f"API request failed with status {response.status}: {await response.text()}")
+    response = client.chat.completions.create(
+        model=model_id,
+        messages=messages,
+        temperature=temperature,
+        response_format={"type": "json_object", "schema": schema}
+    )
 
-            result = await response.json()
-            try:
-                print(result)
-                content = result["choices"][0]["message"]["content"]
-                print(content)
-                # Parse JSON response
-                return json.loads(content)
-            except (KeyError, json.JSONDecodeError) as e:
-                raise Exception(f"Failed to parse response: {str(e)}")
+    try:
+        # print(response)
+        content = response.choices[0].message.content
+        print(content)
+        # The 'reasoning' attribute may not exist in all models/responses
+        if hasattr(response.choices[0].message, 'reasoning'):
+            print(response.choices[0].message.reasoning)
+
+        # Improved JSON parsing that extracts JSON even if other text is present
+        return extract_and_parse_json(content)
+    except Exception as e:
+        raise Exception(f"Failed to parse response: {str(e)}")
+
+def extract_and_parse_json(text: str) -> Dict[str, Any]:
+    """
+    Extract and parse JSON from text that might contain other content.
+
+    Args:
+        text: String that may contain JSON
+
+    Returns:
+        Parsed JSON object
+    """
+    # Try direct parsing first
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Look for JSON within markdown code blocks
+    import re
+    json_block_pattern = r"```(?:json)?\s*([\s\S]*?)```"
+    matches = re.findall(json_block_pattern, text)
+
+    for match in matches:
+        try:
+            return json.loads(match.strip())
+        except json.JSONDecodeError:
+            continue
+
+    # Try to find JSON object by braces
+    try:
+        # Find the first opening brace
+        start_idx = text.find('{')
+        if start_idx >= 0:
+            # Find the matching closing brace
+            brace_count = 0
+            for i in range(start_idx, len(text)):
+                if text[i] == '{':
+                    brace_count += 1
+                elif text[i] == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        # Extract and parse the JSON object
+                        json_str = text[start_idx:i+1]
+                        return json.loads(json_str)
+    except:
+        pass
+
+    # If all methods fail, raise exception
+    raise json.JSONDecodeError("Failed to extract valid JSON from the response", text, 0)
 
 def trim_prompt(prompt: str, context_size: int = DEFAULT_CONTEXT_SIZE) -> str:
     """

@@ -10,6 +10,138 @@ from llm_provider import generate_with_schema, get_model, trim_prompt
 def log(*args):
     print(*args)
 
+# Tool class to encapsulate different search tools
+class Tool:
+    """Base class for tools that can be executed by the LLM to query the codebase."""
+
+    @staticmethod
+    def full_text_search(query: str, directory: str) -> str:
+        """Searches for a query string in all *.c and *.h files under the given directory."""
+        results = []
+        context_lines = 3  # Number of lines to show before and after the match
+
+        # Skip build directories and other common directories to ignore
+        skip_dirs = {'build', 'build_esp32_default', '.git', 'cmake-build'}
+
+        for root, dirs, files in os.walk(directory):
+            # Skip build directories
+            dirs[:] = [d for d in dirs if d not in skip_dirs]
+
+            for file in files:
+                if file.endswith(".c") or file.endswith(".h"):
+                    filepath = os.path.join(root, file)
+                    # Skip files in build directories
+                    if any(skip_dir in filepath for skip_dir in skip_dirs):
+                        continue
+
+                    try:
+                        with open(filepath, "r", encoding="utf-8") as f:
+                            lines = f.readlines()
+                            for i, line in enumerate(lines):
+                                if query.lower() in line.lower():
+                                    # Calculate start and end indices for context
+                                    start_idx = max(0, i - context_lines)
+                                    end_idx = min(len(lines), i + context_lines + 1)
+
+                                    # Get the context lines
+                                    context = lines[start_idx:end_idx]
+
+                                    # Format the output with line numbers and highlight the match
+                                    context_str = "".join([
+                                        f"{j+1:4d} | {line.rstrip()}\n"
+                                        for j, line in enumerate(context, start=start_idx)
+                                    ])
+
+                                    results.append(f"Found match in: {filepath}\n{context_str}")
+                    except Exception as e:
+                        # Only report errors if the file actually exists
+                        if os.path.exists(filepath):
+                            results.append(f"Error reading {filepath}: {e}")
+        return "\n".join(results) if results else "No matches found."
+
+    @staticmethod
+    def limited_text_search(query: str, directory: str, max_hits: int = 10) -> str:
+        """
+        Searches for a query string with a limit on the number of results.
+        If the limit isn't reached, it progressively removes words from the end of the query
+        until either the limit is reached or only the first word remains.
+
+        Args:
+            query: The search query string
+            directory: The directory to search in
+            max_hits: Maximum number of search results to return
+
+        Returns:
+            String containing the search results, limited to max_hits
+        """
+        words = query.strip().split()
+        if not words:
+            return "Empty query provided."
+
+        current_query = query
+        all_results = []
+        # Track unique matches by file path and line number
+        seen_matches = set()
+
+        while words and len(all_results) < max_hits:
+            # Perform the search with the current query
+            result_text = Tool.full_text_search(current_query, directory)
+            # If we got results, add them to our collection
+            if result_text != "No matches found.":
+                # Split the results into individual matches
+                matches = result_text.split("\nFound match in: ")
+
+                # Handle the first match
+                if matches[0].startswith("Found match in: "):
+                    first_match = matches[0]
+                else:
+                    first_match = "Found match in: " + matches[0]
+                    matches = matches[1:]
+
+                # Process all matches
+                new_matches = [first_match] + ["Found match in: " + m for m in matches]
+
+                for match in new_matches:
+                    # Extract file path and line number for deduplication
+                    lines = match.split('\n')
+                    if len(lines) < 2:
+                        continue
+
+                    filepath = lines[0].replace("Found match in: ", "")
+                    # Extract the first line number from the match
+                    try:
+                        line_num = int(lines[1].split('|')[0].strip())
+                        match_key = (filepath, line_num)
+
+                        # Only add if we haven't seen this match before
+                        if match_key not in seen_matches and len(all_results) < max_hits:
+                            seen_matches.add(match_key)
+                            all_results.append(match)
+                    except (ValueError, IndexError):
+                        # In case the line number can't be parsed, use the whole match as key
+                        match_key = match
+                        if match_key not in seen_matches and len(all_results) < max_hits:
+                            seen_matches.add(match_key)
+                            all_results.append(match)
+
+                # If we've reached the limit, break out of the loop
+                if len(all_results) >= max_hits:
+                    break
+
+            # Remove the last word from the query
+            if len(words) > 1:
+                words.pop()
+                current_query = " ".join(words)
+            else:
+                # We're down to the last word and still haven't reached max_hits
+                break
+
+        # Format the final results
+        if not all_results:
+            return "No matches found."
+
+        return "\n".join(all_results[:max_hits])
+
 # Type for research progress tracking
 class ResearchProgress:
     def __init__(self, depth: int, breadth: int):
@@ -28,7 +160,7 @@ async def generate_research_queries(
     learnings: Optional[List[str]] = None
 ) -> List[Dict[str, str]]:
     """Generate research queries based on the user's input."""
-    model = await get_model()
+    model = get_model()
 
     learnings_text = ""
     if learnings:
@@ -67,7 +199,7 @@ Make sure each query is unique and not similar to each other:
         "required": ["queries"]
     }
 
-    result = await generate_with_schema(model, prompt, schema)
+    result = generate_with_schema(model, prompt, schema)
     log(f"Created {len(result['queries'])} queries", result["queries"])
 
     return result["queries"][:num_queries]
@@ -119,26 +251,28 @@ as well as any exact metrics, numbers, or dates. The learnings will be used to r
 
     return result
 
-# Mock function that would be replaced with actual local search functionality
+# Function to search local data using the Tool class
 async def search_local_data(query: str) -> List[str]:
     """
-    Search local data sources based on a query.
-    This is a placeholder that would be replaced with actual local search logic.
+    Search local data sources based on a query using the Tool class.
+    Performs a codebase search using the limited_text_search functionality.
     """
-    # This is where you'd implement your local search functionality
-    # For example, searching files, databases, local knowledge bases, etc.
     log(f"Searching local data for: {query}")
 
-    # Mock result - in real implementation, this would return actual data
-    return [
-        f"This is a mock result for the query: {query}. " +
-        "In a real implementation, this would contain text from local files, " +
-        "databases, or other local data sources.",
+    # Define the directory to search - adjust this to your codebase path
+    directory = os.environ.get("SEARCH_DIRECTORY", os.getcwd())
 
-        f"This is another mock result for: {query}. " +
-        "You would replace this with your actual local search implementation " +
-        "that searches your computer or local data sources."
-    ]
+    # Use the Tool class to perform the search
+    search_results = Tool.limited_text_search(query, directory, max_hits=10)
+
+    # Convert the string results into a list to match the expected return type
+    if search_results == "No matches found.":
+        return [f"No matches found for query: {query}"]
+    else:
+        # Split the results into individual matches for better processing
+        results = search_results.split("Found match in: ")
+        results = ["Found match in: " + r for r in results if r.strip()]
+        return results
 
 # Function to write the final report
 async def write_final_report(
@@ -180,44 +314,6 @@ Here are all the learnings from previous research:
 
     return result["reportMarkdown"] + sources_section
 
-# Function to write a concise answer
-async def write_final_answer(
-    prompt: str,
-    learnings: List[str]
-) -> str:
-    """Write a concise final answer based on the learnings."""
-    model = await get_model()
-
-    learnings_text = chr(10).join([f"<learning>\n{learning}\n</learning>" for learning in learnings])
-
-    prompt_text = f"""Given the following prompt from the user, write a final answer on the topic using the learnings from research.
-Follow the format specified in the prompt. Do not yap or babble or include any other text than the answer besides the format specified in the prompt.
-Keep the answer as concise as possible - usually it should be just a few words or maximum a sentence.
-Try to follow the format specified in the prompt (for example, if the prompt is using Latex, the answer should be in Latex.
-If the prompt gives multiple answer choices, the answer should be one of the choices).
-
-<prompt>{prompt}</prompt>
-
-Here are all the learnings from research on the topic that you can use to help answer the prompt:
-
-<learnings>
-{learnings_text}
-</learnings>"""
-
-    schema = {
-        "type": "object",
-        "properties": {
-            "exactAnswer": {
-                "type": "string",
-                "description": "The final answer, make it short and concise, just the answer, no other text"
-            }
-        },
-        "required": ["exactAnswer"]
-    }
-
-    result = await generate_with_schema(model, prompt_text, schema)
-
-    return result["exactAnswer"]
 
 # Main deep research function
 async def deep_research(
@@ -251,6 +347,8 @@ async def deep_research(
         learnings=learnings
     )
 
+    log(f"Research queries: {research_queries}")
+    exit(0)
     report_progress({
         "total_queries": len(research_queries),
         "current_query": research_queries[0]["query"] if research_queries else None
