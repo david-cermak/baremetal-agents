@@ -12,6 +12,8 @@ from func_ranges import get_function_ranges
 from openai import OpenAI
 import re
 import csv
+import time
+import random
 
 # Load environment variables from .env file
 load_dotenv()
@@ -37,16 +39,30 @@ class Agent:
             {"role": "user", "content": user_prompt}
         ]
 
-        try:
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.5
-            )
-            return response.choices[0].message.content
-        except Exception as e:
-            print(f"Error calling OpenAI API: {str(e)}")
-            return f"Error: {str(e)}"
+        # Implement backoff strategy for rate limiting
+        max_retries = 5
+        retry_count = 0
+        base_delay = 5  # Start with 5 seconds delay
+
+        while retry_count < max_retries:
+            try:
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    temperature=0.5
+                )
+                return response.choices[0].message.content
+            except Exception as e:
+                retry_count += 1
+                if retry_count >= max_retries:
+                    print(f"Failed after {max_retries} attempts. Error: {str(e)}")
+                    return f"Error: {str(e)}"
+
+                # Calculate exponential backoff with jitter
+                delay = base_delay * (2 ** (retry_count - 1)) + random.uniform(0, 1)
+                print(f"API error: {str(e)}. Retrying in {delay:.2f} seconds (attempt {retry_count}/{max_retries})...")
+                time.sleep(delay)
+                print("Retrying now...")
 
 class Reviewer(Agent):
     def __init__(self, model=os.environ["MODEL"]):
@@ -429,6 +445,28 @@ mdns_receiver_init
                 print("\n=== REVIEWER RESPONSE ===")
                 print(review_response)
 
+                # Skip further processing if we got an error
+                if review_response.startswith("Error:"):
+                    print("Received error response. Continuing to next function.")
+
+                    # Write to CSV file with a special ERROR marker
+                    csv_file = "refactoring.csv"
+                    csv_exists = os.path.exists(csv_file)
+
+                    with open(csv_file, 'a', newline='') as f:
+                        writer = csv.writer(f, delimiter=';')
+
+                        # Write header if file doesn't exist
+                        if not csv_exists:
+                            writer.writerow(['original_func_name', 'refactored_func_name'])
+
+                        # Write the entry with "ERROR" to indicate API error
+                        writer.writerow([func_name, "ERROR"])
+                        print(f"Added error mapping: {func_name} → ERROR")
+                        all_mappings.append((func_name, "ERROR"))
+
+                    continue
+
                 # Post-process the reviewer's response to extract refactored function names
                 match = re.search(r'<refactored_function>(.*?)</refactored_function>', review_response, re.DOTALL)
 
@@ -540,6 +578,12 @@ Remember, only use the <refactored_function> tag if you have 95% confidence in y
                             print(f"\n=== REVIEWER RESPONSE (RETRY {retry_count}) ===")
                             print(review_response)
 
+                            # If we got an error response, check if we should continue or stop
+                            if review_response.startswith("Error:"):
+                                print(f"Received error response on retry {retry_count}. Will try again in next iteration.")
+                                # Update the retry counter but continue with the loop
+                                continue
+
                             # Check if we found a refactored function this time
                             match = re.search(r'<refactored_function>(.*?)</refactored_function>', review_response, re.DOTALL)
                             if match:
@@ -588,6 +632,22 @@ Remember, only use the <refactored_function> tag if you have 95% confidence in y
                             print(f"Maximum retry attempts ({max_retries}) reached without finding a confident mapping.")
                     else:
                         print("No sufficient information for additional searches. Moving to next function.")
+
+                    # Write to CSV file with a special marker to indicate no mapping found
+                    csv_file = "refactoring.csv"
+                    csv_exists = os.path.exists(csv_file)
+
+                    with open(csv_file, 'a', newline='') as f:
+                        writer = csv.writer(f, delimiter=';')
+
+                        # Write header if file doesn't exist
+                        if not csv_exists:
+                            writer.writerow(['original_func_name', 'refactored_func_name'])
+
+                        # Write the entry with "???" to indicate no mapping found
+                        writer.writerow([func_name, "???"])
+                        print(f"Added special mapping for unresolved function: {func_name} → ???")
+                        all_mappings.append((func_name, "???"))
 
         except Exception as e:
             print(f"Error processing {file_path}: {e}")
