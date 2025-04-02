@@ -1,0 +1,6 @@
+original_func_name;refactored_func_name
+mdns_if_from_preset_if;mdns_if_from_preset
+esp_netif_from_preset_if;netif_from_preset
+_mdns_get_esp_netif;mdns_priv_get_esp_netif
+_mdns_clean_netif_ptr;mdns_priv_netif_disable
+_mdns_get_if_from_esp_netif;get_if_from_netif
