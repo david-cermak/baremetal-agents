@@ -18,6 +18,83 @@ import random
 # Load environment variables from .env file
 load_dotenv()
 
+# Function to write function mapping to either CSV or markdown file
+def write_mapping_to_file(original_func_name, refactored_func_name,
+                          original_file=None, original_line=None,
+                          refactored_file=None, refactored_line=None,
+                          output_format="csv", function_locations=None):
+    """
+    Write function mapping to a file in either CSV or markdown format.
+
+    Args:
+        original_func_name: Name of the original function
+        refactored_func_name: Name of the refactored function (or "???" or "ERROR")
+        original_file: Path to the original file containing the function
+        original_line: Line number of the original function
+        refactored_file: Path to the refactored file containing the function
+        refactored_line: Line number of the refactored function
+        output_format: "csv" or "markdown"
+        function_locations: Dictionary mapping function names to their file:line locations
+    """
+    if output_format == "csv":
+        # Write to CSV file
+        csv_file = "refactoring.csv"
+        csv_exists = os.path.exists(csv_file)
+
+        with open(csv_file, 'a', newline='') as f:
+            writer = csv.writer(f, delimiter=';')
+
+            # Write header if file doesn't exist
+            if not csv_exists:
+                writer.writerow(['original_func_name', 'refactored_func_name'])
+
+            # Write the mapping entry
+            writer.writerow([original_func_name, refactored_func_name])
+
+        return f"Added mapping to CSV: {original_func_name} → {refactored_func_name}"
+
+    elif output_format == "markdown":
+        # Get repository SHA values from environment
+        orig_sha = os.environ.get("ORIG_SHA", "main")
+        new_sha = os.environ.get("NEW_SHA", "main")
+
+        md_file = "refactoring.md"
+        md_exists = os.path.exists(md_file)
+
+        with open(md_file, 'a') as f:
+            # Write header if file doesn't exist
+            if not md_exists:
+                f.write("| Original Function | Refactored Function |\n")
+                f.write("|------------------|--------------------|\n")
+
+            # Create markdown links if file and line info is available
+            if original_file and original_line:
+                original_link = f"[{original_func_name}](https://github.com/espressif/esp-protocols/blob/{orig_sha}/components/mdns/{original_file}#L{original_line})"
+            else:
+                original_link = original_func_name
+
+            # Try to get refactored function location from the dictionary if available
+            if refactored_func_name not in ["???", "ERROR"] and function_locations and refactored_func_name in function_locations:
+                # Parse the location from the dictionary
+                location_parts = function_locations[refactored_func_name].split(':')
+                if len(location_parts) == 2:
+                    ref_file, ref_line = location_parts
+                    refactored_link = f"[{refactored_func_name}](https://github.com/espressif/esp-protocols/blob/{new_sha}/components/mdns/{ref_file}#L{ref_line})"
+                else:
+                    refactored_link = refactored_func_name
+            elif refactored_func_name not in ["???", "ERROR"] and refactored_file and refactored_line:
+                refactored_link = f"[{refactored_func_name}](https://github.com/espressif/esp-protocols/blob/{new_sha}/{refactored_file}#L{refactored_line})"
+            else:
+                refactored_link = refactored_func_name
+
+            # Write the entry
+            f.write(f"| {original_link} | {refactored_link} |\n")
+
+        return f"Added mapping to markdown: {original_func_name} → {refactored_func_name}"
+
+    else:
+        return f"Unsupported output format: {output_format}"
+
 class Agent:
     def __init__(self, system_prompt=None, model=None):
         self.client = OpenAI(
@@ -332,6 +409,7 @@ if __name__ == "__main__":
     # Set paths from environment variables or use defaults
     original_code_path = os.environ.get("ORIGINAL_CODE_PATH", "/home/david/repos/proto/components/mdns_old")
     refactored_code_path = os.environ.get("REFACTORED_CODE_PATH", "/home/david/repos/proto/components/mdns")
+    output_format = os.environ.get("OUTPUT_FORMAT", "csv")
 
     # Create embedder instance
     embedder = FunctionEmbedder()
@@ -428,8 +506,16 @@ mdns_receiver_init
                 # Search for similar functions in the refactored codebase
                 docs, formatted_results = embedder.search_functions(func_content, 3)
                 context = ""
-                for result in formatted_results:
+                function_names_and_lines = {}
+
+                # Create a dictionary mapping function names to their location information
+                for i, result in enumerate(formatted_results):
                     context += result
+                    if i < len(docs):  # Safety check to avoid index errors
+                        source_file = docs[i].metadata.get('source', '')
+                        start_line = docs[i].metadata.get('start_line', '')
+                        function_name = docs[i].metadata.get('function', '')
+                        function_names_and_lines[function_name] = f"{source_file}:{start_line}"
                 refactored_context = f"""
 ### Refactored code
 
@@ -449,21 +535,17 @@ mdns_receiver_init
                 if review_response.startswith("Error:"):
                     print("Received error response. Continuing to next function.")
 
-                    # Write to CSV file with a special ERROR marker
-                    csv_file = "refactoring.csv"
-                    csv_exists = os.path.exists(csv_file)
-
-                    with open(csv_file, 'a', newline='') as f:
-                        writer = csv.writer(f, delimiter=';')
-
-                        # Write header if file doesn't exist
-                        if not csv_exists:
-                            writer.writerow(['original_func_name', 'refactored_func_name'])
-
-                        # Write the entry with "ERROR" to indicate API error
-                        writer.writerow([func_name, "ERROR"])
-                        print(f"Added error mapping: {func_name} → ERROR")
-                        all_mappings.append((func_name, "ERROR"))
+                    # Use the new function to write to file with ERROR marker
+                    result_msg = write_mapping_to_file(
+                        original_func_name=func_name,
+                        refactored_func_name="ERROR",
+                        original_file=os.path.relpath(file_path, original_code_path),
+                        original_line=start_line,
+                        output_format=output_format,
+                        function_locations=function_names_and_lines
+                    )
+                    print(result_msg)
+                    all_mappings.append((func_name, "ERROR"))
 
                     continue
 
@@ -471,26 +553,23 @@ mdns_receiver_init
                 match = re.search(r'<refactored_function>(.*?)</refactored_function>', review_response, re.DOTALL)
 
                 if match:
-                    # Get function names (might be multiple functions separated by newlines)
+                    # We found a match! Process it
                     content = match.group(1).strip()
                     refactored_func_names = [name.strip() for name in content.split('\n') if name.strip()]
 
-                    # Write to CSV file
-                    csv_file = "refactoring.csv"
-                    csv_exists = os.path.exists(csv_file)
-
-                    with open(csv_file, 'a', newline='') as f:
-                        writer = csv.writer(f, delimiter=';')
-
-                        # Write header if file doesn't exist
-                        if not csv_exists:
-                            writer.writerow(['original_func_name', 'refactored_func_name'])
-
-                        # Write each refactored function
-                        for refactored_name in refactored_func_names:
-                            writer.writerow([func_name, refactored_name])
-                            print(f"Added mapping: {func_name} → {refactored_name}")
-                            all_mappings.append((func_name, refactored_name))
+                    # Process each refactored function name
+                    for refactored_name in refactored_func_names:
+                        # Use the new function to write to file
+                        result_msg = write_mapping_to_file(
+                            original_func_name=func_name,
+                            refactored_func_name=refactored_name,
+                            original_file=os.path.relpath(file_path, original_code_path),
+                            original_line=start_line,
+                            output_format=output_format,
+                            function_locations=function_names_and_lines
+                        )
+                        print(result_msg)
+                        all_mappings.append((func_name, refactored_name))
                 else:
                     print("No refactored function found in the response. Continuing with next function.")
                     # Now let's try to add additional context to the prompt
@@ -591,22 +670,19 @@ Remember, only use the <refactored_function> tag if you have 95% confidence in y
                                 content = match.group(1).strip()
                                 refactored_func_names = [name.strip() for name in content.split('\n') if name.strip()]
 
-                                # Write to CSV file
-                                csv_file = "refactoring.csv"
-                                csv_exists = os.path.exists(csv_file)
-
-                                with open(csv_file, 'a', newline='') as f:
-                                    writer = csv.writer(f, delimiter=';')
-
-                                    # Write header if file doesn't exist
-                                    if not csv_exists:
-                                        writer.writerow(['original_func_name', 'refactored_func_name'])
-
-                                    # Write each refactored function
-                                    for refactored_name in refactored_func_names:
-                                        writer.writerow([func_name, refactored_name])
-                                        print(f"Added mapping: {func_name} → {refactored_name}")
-                                        all_mappings.append((func_name, refactored_name))
+                                # Process each refactored function name
+                                for refactored_name in refactored_func_names:
+                                    # Use the new function to write to file
+                                    result_msg = write_mapping_to_file(
+                                        original_func_name=func_name,
+                                        refactored_func_name=refactored_name,
+                                        original_file=os.path.relpath(file_path, original_code_path),
+                                        original_line=start_line,
+                                        output_format=output_format,
+                                        function_locations=function_names_and_lines
+                                    )
+                                    print(result_msg)
+                                    all_mappings.append((func_name, refactored_name))
 
                                 # Found a match, break out of the retry loop
                                 break
@@ -633,21 +709,17 @@ Remember, only use the <refactored_function> tag if you have 95% confidence in y
                     else:
                         print("No sufficient information for additional searches. Moving to next function.")
 
-                    # Write to CSV file with a special marker to indicate no mapping found
-                    csv_file = "refactoring.csv"
-                    csv_exists = os.path.exists(csv_file)
-
-                    with open(csv_file, 'a', newline='') as f:
-                        writer = csv.writer(f, delimiter=';')
-
-                        # Write header if file doesn't exist
-                        if not csv_exists:
-                            writer.writerow(['original_func_name', 'refactored_func_name'])
-
-                        # Write the entry with "???" to indicate no mapping found
-                        writer.writerow([func_name, "???"])
-                        print(f"Added special mapping for unresolved function: {func_name} → ???")
-                        all_mappings.append((func_name, "???"))
+                    # Use the new function to write to file with ??? marker
+                    result_msg = write_mapping_to_file(
+                        original_func_name=func_name,
+                        refactored_func_name="???",
+                        original_file=os.path.relpath(file_path, original_code_path),
+                        original_line=start_line,
+                        output_format=output_format,
+                        function_locations=function_names_and_lines
+                    )
+                    print(result_msg)
+                    all_mappings.append((func_name, "???"))
 
         except Exception as e:
             print(f"Error processing {file_path}: {e}")
@@ -658,7 +730,12 @@ Remember, only use the <refactored_function> tag if you have 95% confidence in y
         for original, refactored in all_mappings:
             print(f"{original} → {refactored}")
         print(f"\nTotal mappings found: {len(all_mappings)}")
-        print(f"Mappings saved to refactoring.csv")
+        if output_format == "csv":
+            print(f"Mappings saved to refactoring.csv")
+        elif output_format == "markdown":
+            print(f"Mappings saved to refactoring.md")
+        else:
+            print(f"Mappings saved in {output_format} format")
     else:
         print("No refactoring mappings were found.")
 
