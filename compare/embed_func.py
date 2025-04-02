@@ -22,7 +22,7 @@ load_dotenv()
 def write_mapping_to_file(original_func_name, refactored_func_name,
                           original_file=None, original_line=None,
                           refactored_file=None, refactored_line=None,
-                          output_format="csv", function_locations=None):
+                          output_format="csv", function_locations=None, concern=None):
     """
     Write function mapping to a file in either CSV or markdown format.
 
@@ -35,6 +35,7 @@ def write_mapping_to_file(original_func_name, refactored_func_name,
         refactored_line: Line number of the refactored function
         output_format: "csv" or "markdown"
         function_locations: Dictionary mapping function names to their file:line locations
+        concern: Any potential concerns about the refactoring (optional)
     """
     if output_format == "csv":
         # Write to CSV file
@@ -46,12 +47,12 @@ def write_mapping_to_file(original_func_name, refactored_func_name,
 
             # Write header if file doesn't exist
             if not csv_exists:
-                writer.writerow(['original_func_name', 'refactored_func_name'])
+                writer.writerow(['original_func_name', 'refactored_func_name', 'concern'])
 
             # Write the mapping entry
-            writer.writerow([original_func_name, refactored_func_name])
+            writer.writerow([original_func_name, refactored_func_name, concern or ""])
 
-        return f"Added mapping to CSV: {original_func_name} → {refactored_func_name}"
+        return f"Added mapping to CSV: {original_func_name} → {refactored_func_name}" + (f" (with concern)" if concern else "")
 
     elif output_format == "markdown":
         # Get repository SHA values from environment
@@ -64,8 +65,8 @@ def write_mapping_to_file(original_func_name, refactored_func_name,
         with open(md_file, 'a') as f:
             # Write header if file doesn't exist
             if not md_exists:
-                f.write("| Original Function | Refactored Function |\n")
-                f.write("|------------------|--------------------|\n")
+                f.write("| Original Function | Refactored Function | Concerns |\n")
+                f.write("|------------------|--------------------|---------|\n")
 
             # Create markdown links if file and line info is available
             if original_file and original_line:
@@ -87,10 +88,11 @@ def write_mapping_to_file(original_func_name, refactored_func_name,
             else:
                 refactored_link = refactored_func_name
 
-            # Write the entry
-            f.write(f"| {original_link} | {refactored_link} |\n")
+            # Write the entry with concerns (if any)
+            concern_text = concern or ""
+            f.write(f"| {original_link} | {refactored_link} | {concern_text} |\n")
 
-        return f"Added mapping to markdown: {original_func_name} → {refactored_func_name}"
+        return f"Added mapping to markdown: {original_func_name} → {refactored_func_name}" + (f" (with concern)" if concern else "")
 
     else:
         return f"Unsupported output format: {output_format}"
@@ -458,11 +460,19 @@ Your goal is to find the actual refactored function. If unsure, please summarize
 In the next iteration, you can run contextual search or full-text search of the original and refactored code.
 
 Format your response as follows:
-* If you have 95% confidence, just state the name of the function you think is the refactored function. Do not say anything else just the function name withing xml tags, for example:
+* If you have 95% confidence, just state the name of the function you think is the refactored function. If everything looks safe do not say anything else just the function name withing xml tags, for example:
 ```xml
 <refactored_function>
 mdns_init
 </refactored_function>
+* If you have 95% confidence that the function the refactored one, but you have a concern, that a subtle bug might have been introduced, say the name of the function and the concern you have, for example:
+```xml
+<refactored_function>
+mdns_init
+</refactored_function>
+<concern>
+the new mdns_init function does not check if the pcb is not NULL.
+</concern>
 ```
 * If you have 95% confidence that the original function is not present in the refactored code, just say empty xml tags:
 ```xml
@@ -480,6 +490,7 @@ mdns_receiver_init
 ```xml
 <summary>
 I learned that the function mdns_init might have been split into multiple functions, mdns_init_internal and mdns_receiver_init.
+Add more details here, to help the next reviewer understand why you think another search and reasoning is needed.
 </summary>
 <follow_up>
 You have to verify if mdns_init_internal and mdns_receiver_init are the replacements for the original function.
@@ -512,10 +523,10 @@ mdns_receiver_init
                 for i, result in enumerate(formatted_results):
                     context += result
                     if i < len(docs):  # Safety check to avoid index errors
-                        source_file = docs[i].metadata.get('source', '')
-                        start_line = docs[i].metadata.get('start_line', '')
-                        function_name = docs[i].metadata.get('function', '')
-                        function_names_and_lines[function_name] = f"{source_file}:{start_line}"
+                        source_file1 = docs[i].metadata.get('source', '')
+                        start_line1 = docs[i].metadata.get('start_line', '')
+                        function_name1 = docs[i].metadata.get('function', '')
+                        function_names_and_lines[function_name1] = f"{source_file1}:{start_line1}"
                 refactored_context = f"""
 ### Refactored code
 
@@ -542,15 +553,20 @@ mdns_receiver_init
                         original_file=os.path.relpath(file_path, original_code_path),
                         original_line=start_line,
                         output_format=output_format,
-                        function_locations=function_names_and_lines
+                        function_locations=function_names_and_lines,
+                        concern=None
                     )
                     print(result_msg)
-                    all_mappings.append((func_name, "ERROR"))
+                    all_mappings.append((func_name, "ERROR", None))
 
                     continue
 
                 # Post-process the reviewer's response to extract refactored function names
                 match = re.search(r'<refactored_function>(.*?)</refactored_function>', review_response, re.DOTALL)
+
+                # Extract concern if present
+                concern_match = re.search(r'<concern>(.*?)</concern>', review_response, re.DOTALL)
+                concern = concern_match.group(1).strip() if concern_match else None
 
                 if match:
                     # We found a match! Process it
@@ -566,10 +582,11 @@ mdns_receiver_init
                             original_file=os.path.relpath(file_path, original_code_path),
                             original_line=start_line,
                             output_format=output_format,
-                            function_locations=function_names_and_lines
+                            function_locations=function_names_and_lines,
+                            concern=concern
                         )
                         print(result_msg)
-                        all_mappings.append((func_name, refactored_name))
+                        all_mappings.append((func_name, refactored_name, concern))
                 else:
                     print("No refactored function found in the response. Continuing with next function.")
                     # Now let's try to add additional context to the prompt
@@ -665,6 +682,11 @@ Remember, only use the <refactored_function> tag if you have 95% confidence in y
 
                             # Check if we found a refactored function this time
                             match = re.search(r'<refactored_function>(.*?)</refactored_function>', review_response, re.DOTALL)
+
+                            # Extract concern if present
+                            concern_match = re.search(r'<concern>(.*?)</concern>', review_response, re.DOTALL)
+                            concern = concern_match.group(1).strip() if concern_match else None
+
                             if match:
                                 # We found a match! Process it
                                 content = match.group(1).strip()
@@ -679,10 +701,11 @@ Remember, only use the <refactored_function> tag if you have 95% confidence in y
                                         original_file=os.path.relpath(file_path, original_code_path),
                                         original_line=start_line,
                                         output_format=output_format,
-                                        function_locations=function_names_and_lines
+                                        function_locations=function_names_and_lines,
+                                        concern=concern
                                     )
                                     print(result_msg)
-                                    all_mappings.append((func_name, refactored_name))
+                                    all_mappings.append((func_name, refactored_name, concern))
 
                                 # Found a match, break out of the retry loop
                                 break
@@ -716,10 +739,11 @@ Remember, only use the <refactored_function> tag if you have 95% confidence in y
                         original_file=os.path.relpath(file_path, original_code_path),
                         original_line=start_line,
                         output_format=output_format,
-                        function_locations=function_names_and_lines
+                        function_locations=function_names_and_lines,
+                        concern=None
                     )
                     print(result_msg)
-                    all_mappings.append((func_name, "???"))
+                    all_mappings.append((func_name, "???", None))
 
         except Exception as e:
             print(f"Error processing {file_path}: {e}")
@@ -727,8 +751,11 @@ Remember, only use the <refactored_function> tag if you have 95% confidence in y
     # Print summary of all mappings found
     print("\n=== SUMMARY OF REFACTORING MAPPINGS ===")
     if all_mappings:
-        for original, refactored in all_mappings:
-            print(f"{original} → {refactored}")
+        for original, refactored, concern in all_mappings:
+            if concern:
+                print(f"{original} → {refactored} (Concern: {concern})")
+            else:
+                print(f"{original} → {refactored}")
         print(f"\nTotal mappings found: {len(all_mappings)}")
         if output_format == "csv":
             print(f"Mappings saved to refactoring.csv")
