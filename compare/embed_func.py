@@ -68,9 +68,12 @@ Provide clear, precise answers with high confidence when possible, or structured
 
         super().__init__(system_prompt=system_prompt, model=model)
 
-# Function to load all c files as functions using func_ranges.py
+# Function to load all C and header files as functions using func_ranges.py
 def load_functions_from_files(directory_path):
-    file_paths = glob(os.path.join(directory_path, '*.c'))
+    # Get all .c and .h files from the directory
+    c_files = glob(os.path.join(directory_path, '**/*.c'), recursive=True)
+    h_files = glob(os.path.join(directory_path, '**/*.h'), recursive=True)
+    file_paths = c_files + h_files
     documents = []
 
     for file_path in tqdm(file_paths, desc="Processing files"):
@@ -196,6 +199,14 @@ def full_text_search(query: str, directory: str, max_results: int = 20) -> str:
     results = []
     context_lines = 3  # Number of lines to show before and after the match
 
+    # Also look for inline function definition patterns if the query appears to be a function name
+    inline_patterns = [
+        f"static\\s+inline\\s+[\\w\\*]+\\s+{query}\\s*\\(",  # static inline return_type function_name(
+        f"inline\\s+static\\s+[\\w\\*]+\\s+{query}\\s*\\(",  # inline static return_type function_name(
+        f"IRAM_ATTR\\s+[\\w\\*]+\\s+{query}\\s*\\(",         # IRAM_ATTR return_type function_name(
+        f"INLINE_FN\\s+[\\w\\*]+\\s+{query}\\s*\\("          # INLINE_FN return_type function_name(
+    ]
+
     # Skip build directories and other common directories to ignore
     skip_dirs = {'build', 'build_esp32_default', '.git', 'cmake-build'}
 
@@ -213,6 +224,8 @@ def full_text_search(query: str, directory: str, max_results: int = 20) -> str:
                 try:
                     with open(filepath, "r", encoding="utf-8") as f:
                         lines = f.readlines()
+
+                        # First look for exact matches
                         for i, line in enumerate(lines):
                             if query.lower() in line.lower():
                                 # Calculate start and end indices for context
@@ -234,6 +247,36 @@ def full_text_search(query: str, directory: str, max_results: int = 20) -> str:
                                 if len(results) >= max_results:
                                     break_message = f"Reached maximum of {max_results} results. Consider refining your search."
                                     return "\n".join(results) + f"\n\n{break_message}"
+
+                        # For function names, also look for inline function definitions using regex
+                        if len(query.split()) == 1:  # Likely a function name if it's a single word
+                            file_content = ''.join(lines)
+                            for pattern in inline_patterns:
+                                for match in re.finditer(pattern, file_content, re.MULTILINE | re.IGNORECASE):
+                                    match_pos = match.start()
+
+                                    # Find the line number of the match
+                                    line_num = file_content[:match_pos].count('\n')
+
+                                    # Calculate start and end indices for context
+                                    start_idx = max(0, line_num - context_lines)
+                                    end_idx = min(len(lines), line_num + context_lines + 1)
+
+                                    # Get the context lines
+                                    context = lines[start_idx:end_idx]
+
+                                    # Format the output with line numbers
+                                    context_str = "".join([
+                                        f"{j+1:4d} | {line.rstrip()}\n"
+                                        for j, line in enumerate(context, start=start_idx)
+                                    ])
+
+                                    results.append(f"Found inline function in: {filepath}\n{context_str}")
+
+                                    # Check if we've reached the maximum number of results
+                                    if len(results) >= max_results:
+                                        break_message = f"Reached maximum of {max_results} results. Consider refining your search."
+                                        return "\n".join(results) + f"\n\n{break_message}"
                 except Exception as e:
                     # Only report errors if the file actually exists
                     if os.path.exists(filepath):
@@ -258,6 +301,12 @@ if __name__ == "__main__":
         print("You can still use embedding and search functionality without an API key.")
         print()
 
+    # Test code for examining header functions - Can be commented out for normal operation
+    # function_ranges = get_function_ranges("/home/david/repos/proto/components/mdns/private_include/mdns_utils.h")
+    # for func_name, (start_line, end_line, func_content) in function_ranges.items():
+    #     print(f"Function: {func_name} (lines {start_line}-{end_line})")
+    # exit()
+
     # Example search
     print("\nRunning example search...")
     # full_search = full_text_search("mdns_init", "/home/david/repos/proto/components/mdns")
@@ -275,15 +324,40 @@ if __name__ == "__main__":
     if not embedder.vectordb:
         embedder.create_db_from_directory(refactored_code_path)
 
-    function_ranges = get_function_ranges(os.path.join(original_code_path, "mdns.c"))
+    # Process both .c and .h files
+    # Define file types to process
+    files_to_process = [ ] #os.path.join(original_code_path, 'mdns.c') ]
+
+    # Add .c files
+    c_files = glob(os.path.join(original_code_path, '**/*.c'), recursive=True)
+    files_to_process.extend(c_files)
+
+    # # Add .h files
+    h_files = glob(os.path.join(original_code_path, '**/*.h'), recursive=True)
+    files_to_process.extend(h_files)
 
     # Keep track of all mappings
     all_mappings = []
 
-    # Create a Document for each function
-    for func_name, (start_line, end_line, func_content) in function_ranges.items():
-        full_text = full_text_search(func_name, original_code_path)
-        original_context = f"""
+    # Process each file
+    for file_path in files_to_process:
+        print(f"\nProcessing file: {file_path}")
+        try:
+            function_ranges = get_function_ranges(file_path)
+
+            if not function_ranges:
+                print(f"No functions found in {file_path}")
+                continue
+
+            # Create a Document for each function
+            for func_name, (start_line, end_line, func_content) in function_ranges.items():
+                print(f"\nFunction(lines {start_line}-{end_line}): {func_name}")
+                # if func_name != "mdns_if_from_preset_if":
+                #     continue
+
+                # Search for original function references
+                full_text = full_text_search(func_name, original_code_path)
+                original_context = f"""
 Please review the following refactoring of the function {func_name}. Mostly code structure changes and renaming.
 The below context shows the original function and the refactored code containing multiple functions that might replace the original function.
 Your goal is to find the actual refactored function. If unsure, please summarize what you learned and give follow up questions.
@@ -331,64 +405,192 @@ mdns_receiver_init
 {func_content}
 ```
 
-### Function references withing the original codebase
+### Function references in the original codebase
 {full_text}
 
 """
-        print(f"Function(lines {start_line}-{end_line}): {func_name}")
-        docs, formatted_results = embedder.search_functions(func_content, 3)
-        context = ""
-        for result in formatted_results:
-            context += result
-        refactored_context = f"""
+                # Search for similar functions in the refactored codebase
+                docs, formatted_results = embedder.search_functions(func_content, 3)
+                context = ""
+                for result in formatted_results:
+                    context += result
+                refactored_context = f"""
 ### Refactored code
 
 {context}
 """
-        print(original_context)
-        print(refactored_context)
+                # print(original_context)
+                # print(refactored_context)
 
-        # Create a reviewer and generate a response
-        reviewer = Reviewer()
-        full_prompt = original_context + refactored_context
-        review_response = reviewer.generate_response(full_prompt)
-        print("\n=== REVIEWER RESPONSE ===")
-        print(review_response)
+                # Create a reviewer and generate a response
+                reviewer = Reviewer()
+                full_prompt = original_context + refactored_context
+                review_response = reviewer.generate_response(full_prompt)
+                print("\n=== REVIEWER RESPONSE ===")
+                print(review_response)
 
-        # Post-process the reviewer's response to extract refactored function names
-        refactored_functions = []
-        match = re.search(r'<refactored_function>(.*?)</refactored_function>', review_response, re.DOTALL)
+                # Post-process the reviewer's response to extract refactored function names
+                match = re.search(r'<refactored_function>(.*?)</refactored_function>', review_response, re.DOTALL)
 
-        if match:
-            # Get function names (might be multiple functions separated by newlines)
-            content = match.group(1).strip()
-            refactored_func_names = [name.strip() for name in content.split('\n') if name.strip()]
+                if match:
+                    # Get function names (might be multiple functions separated by newlines)
+                    content = match.group(1).strip()
+                    refactored_func_names = [name.strip() for name in content.split('\n') if name.strip()]
 
-            # Write to CSV file
-            csv_file = "refactoring.csv"
-            csv_exists = os.path.exists(csv_file)
+                    # Write to CSV file
+                    csv_file = "refactoring.csv"
+                    csv_exists = os.path.exists(csv_file)
 
-            with open(csv_file, 'a', newline='') as f:
-                writer = csv.writer(f, delimiter=';')
+                    with open(csv_file, 'a', newline='') as f:
+                        writer = csv.writer(f, delimiter=';')
 
-                # Write header if file doesn't exist
-                if not csv_exists:
-                    writer.writerow(['original_func_name', 'refactored_func_name'])
+                        # Write header if file doesn't exist
+                        if not csv_exists:
+                            writer.writerow(['original_func_name', 'refactored_func_name'])
 
-                # Write each refactored function
-                for refactored_name in refactored_func_names:
-                    writer.writerow([func_name, refactored_name])
-                    print(f"Added mapping: {func_name} → {refactored_name}")
-                    all_mappings.append((func_name, refactored_name))
+                        # Write each refactored function
+                        for refactored_name in refactored_func_names:
+                            writer.writerow([func_name, refactored_name])
+                            print(f"Added mapping: {func_name} → {refactored_name}")
+                            all_mappings.append((func_name, refactored_name))
+                else:
+                    print("No refactored function found in the response. Continuing with next function.")
+                    # Now let's try to add additional context to the prompt
+                    summary = None
+                    search_original_terms = None
+                    search_refactored_terms = None
+                    follow_up_questions = None
 
-            # Continue to the next function
-            continue
-        else:
-            print("No refactored function found in the response. Stopping the loop.")
-            break
+                    # Extract summary if available
+                    match = re.search(r'<summary>(.*?)</summary>', review_response, re.DOTALL)
+                    if match:
+                        summary = match.group(1).strip()
+                        print(f"Summary: {summary}")
 
-        # Here you could use formatted_results for further processing if needed
-        # exit() - removed to allow looping through all functions
+                    # Extract follow-up questions if available
+                    match = re.search(r'<follow_up>(.*?)</follow_up>', review_response, re.DOTALL)
+                    if match:
+                        follow_up_questions = match.group(1).strip()
+                        print(f"Follow-up questions: {follow_up_questions}")
+
+                    # Extract search terms for original code
+                    match = re.search(r'<search_original>(.*?)</search_original>', review_response, re.DOTALL)
+                    if match:
+                        search_original_terms = match.group(1).strip()
+                        print(f"Search terms for original code: {search_original_terms}")
+
+                    # Extract search terms for refactored code
+                    match = re.search(r'<search_refactored>(.*?)</search_refactored>', review_response, re.DOTALL)
+                    if match:
+                        search_refactored_terms = match.group(1).strip()
+                        print(f"Search terms for refactored code: {search_refactored_terms}")
+
+                    # If we have search terms, try up to 3 more iterations with additional context
+                    if summary and (search_original_terms or search_refactored_terms):
+                        max_retries = 3
+                        retry_count = 0
+
+                        while retry_count < max_retries:
+                            retry_count += 1
+                            print(f"\n=== RETRY ATTEMPT {retry_count}/{max_retries} ===")
+
+                            additional_context = f"""
+## Additional context from previous analysis
+
+### Summary of previous findings
+{summary}
+
+"""
+                            # Add follow-up questions if available
+                            if follow_up_questions:
+                                additional_context += f"""
+### Questions to consider
+{follow_up_questions}
+
+"""
+
+                            # Search for original terms if provided
+                            if search_original_terms:
+                                original_search_results = full_text_search(search_original_terms, original_code_path)
+                                additional_context += f"""
+### Additional search results from original codebase for "{search_original_terms}"
+{original_search_results}
+
+"""
+
+                            # Search for refactored terms if provided
+                            if search_refactored_terms:
+                                refactored_search_results = full_text_search(search_refactored_terms, refactored_code_path)
+                                additional_context += f"""
+### Additional search results from refactored codebase for "{search_refactored_terms}"
+{refactored_search_results}
+
+"""
+
+                            # Add a reminder about the confidence requirement
+                            additional_context += """
+Based on this additional context, please reconsider your analysis and provide a more confident answer if possible.
+Remember, only use the <refactored_function> tag if you have 95% confidence in your determination.
+"""
+
+                            # Generate a new response with the additional context
+                            enhanced_prompt = full_prompt + additional_context
+                            print("Generating new response with additional context...")
+                            review_response = reviewer.generate_response(enhanced_prompt)
+                            print(f"\n=== REVIEWER RESPONSE (RETRY {retry_count}) ===")
+                            print(review_response)
+
+                            # Check if we found a refactored function this time
+                            match = re.search(r'<refactored_function>(.*?)</refactored_function>', review_response, re.DOTALL)
+                            if match:
+                                # We found a match! Process it
+                                content = match.group(1).strip()
+                                refactored_func_names = [name.strip() for name in content.split('\n') if name.strip()]
+
+                                # Write to CSV file
+                                csv_file = "refactoring.csv"
+                                csv_exists = os.path.exists(csv_file)
+
+                                with open(csv_file, 'a', newline='') as f:
+                                    writer = csv.writer(f, delimiter=';')
+
+                                    # Write header if file doesn't exist
+                                    if not csv_exists:
+                                        writer.writerow(['original_func_name', 'refactored_func_name'])
+
+                                    # Write each refactored function
+                                    for refactored_name in refactored_func_names:
+                                        writer.writerow([func_name, refactored_name])
+                                        print(f"Added mapping: {func_name} → {refactored_name}")
+                                        all_mappings.append((func_name, refactored_name))
+
+                                # Found a match, break out of the retry loop
+                                break
+
+                            # Extract new information for the next iteration if needed
+                            new_summary = re.search(r'<summary>(.*?)</summary>', review_response, re.DOTALL)
+                            if new_summary:
+                                summary = new_summary.group(1).strip()
+
+                            new_follow_up = re.search(r'<follow_up>(.*?)</follow_up>', review_response, re.DOTALL)
+                            if new_follow_up:
+                                follow_up_questions = new_follow_up.group(1).strip()
+
+                            new_search_original = re.search(r'<search_original>(.*?)</search_original>', review_response, re.DOTALL)
+                            if new_search_original:
+                                search_original_terms = new_search_original.group(1).strip()
+
+                            new_search_refactored = re.search(r'<search_refactored>(.*?)</search_refactored>', review_response, re.DOTALL)
+                            if new_search_refactored:
+                                search_refactored_terms = new_search_refactored.group(1).strip()
+
+                        if retry_count >= max_retries:
+                            print(f"Maximum retry attempts ({max_retries}) reached without finding a confident mapping.")
+                    else:
+                        print("No sufficient information for additional searches. Moving to next function.")
+
+        except Exception as e:
+            print(f"Error processing {file_path}: {e}")
 
     # Print summary of all mappings found
     print("\n=== SUMMARY OF REFACTORING MAPPINGS ===")
