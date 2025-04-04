@@ -1,9 +1,9 @@
 # General Configuration
 PROJECT_NAME           = "TCP Project"
 OUTPUT_DIRECTORY       = .
-INPUT                  = /home/david/esp/idf/components/lwip/lwip/src/core/tcp.c
+INPUT                  = /home/david/esp/idf/components/lwip/lwip/src/
 FILE_PATTERNS          = *.c
-RECURSIVE              = NO
+RECURSIVE              = YES
 
 # Generate XML Output
 GENERATE_XML           = YES
@@ -25,4 +25,4 @@ HAVE_DOT               = NO
 GENERATE_HTML          = NO
 GENERATE_LATEX         = NO
 # Comment Parsing
-ALIASES        
+ALIASES
