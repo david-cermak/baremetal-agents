@@ -9,11 +9,14 @@ from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores.utils import DistanceStrategy
 from func_ranges import get_function_ranges
-from openai import OpenAI
 import re
 import csv
 import time
 import random
+
+# Import our new modules
+from models.reviewer import Reviewer
+from utils.response_parser import ResponseParser
 
 # Load environment variables from .env file
 load_dotenv()
@@ -96,72 +99,6 @@ def write_mapping_to_file(original_func_name, refactored_func_name,
 
     else:
         return f"Unsupported output format: {output_format}"
-
-class Agent:
-    def __init__(self, system_prompt=None, model=None):
-        self.client = OpenAI(
-            api_key=os.environ.get("API_KEY", ""),
-            base_url=os.environ.get("BASE_URL", "https://api.openai.com/v1")
-        )
-        self.model = model or os.environ.get("MODEL", "gpt-4-0125-preview")
-        self.system_prompt = system_prompt or os.environ.get("SYSTEM_PROMPT", "You are a helpful assistant specializing in code analysis.")
-
-    def generate_response(self, user_prompt):
-        # Check if API key is provided
-        if not os.environ.get("API_KEY") and not self.client.api_key:
-            print("Warning: No API_KEY provided in environment variables or constructor.")
-            print("Please set API_KEY in your .env file or provide it when initializing the Agent.")
-            return "Error: No API key provided. Set API_KEY in .env file or provide it when initializing."
-
-        messages = [
-            {"role": "system", "content": self.system_prompt},
-            {"role": "user", "content": user_prompt}
-        ]
-
-        # Implement backoff strategy for rate limiting
-        max_retries = 5
-        retry_count = 0
-        base_delay = 5  # Start with 5 seconds delay
-
-        while retry_count < max_retries:
-            try:
-                response = self.client.chat.completions.create(
-                    model=self.model,
-                    messages=messages,
-                    temperature=0.5
-                )
-                return response.choices[0].message.content
-            except Exception as e:
-                retry_count += 1
-                if retry_count >= max_retries:
-                    print(f"Failed after {max_retries} attempts. Error: {str(e)}")
-                    return f"Error: {str(e)}"
-
-                # Calculate exponential backoff with jitter
-                delay = base_delay * (2 ** (retry_count - 1)) + random.uniform(0, 1)
-                print(f"API error: {str(e)}. Retrying in {delay:.2f} seconds (attempt {retry_count}/{max_retries})...")
-                time.sleep(delay)
-                print("Retrying now...")
-
-class Reviewer(Agent):
-    def __init__(self, model=os.environ["MODEL"]):
-        system_prompt = """You are an expert code reviewer specializing in C programming, networking protocols, and MDNS implementation.
-Your expertise includes:
-- Deep understanding of C language patterns, memory management, and optimization techniques
-- Comprehensive knowledge of network programming, socket APIs, and protocol implementation
-- Specific expertise in multicast DNS (MDNS) protocol specifications, service discovery, and Zero-configuration networking
-- Ability to identify refactoring patterns, code structure changes, and function renaming
-- Experience analyzing complex codebases and tracing function relationships
-
-When reviewing code changes between original and refactored implementations:
-1. Focus on functional equivalence rather than syntactic differences
-2. Identify when functions are split, merged, renamed, or otherwise restructured
-3. Pay special attention to error handling, resource management, and protocol-specific logic
-4. Consider implementation details specific to embedded systems and constrained environments
-
-Provide clear, precise answers with high confidence when possible, or structured analytical responses when further investigation is needed."""
-
-        super().__init__(system_prompt=system_prompt, model=model)
 
 # Function to load all C and header files as functions using func_ranges.py
 def load_functions_from_files(directory_path):
@@ -396,18 +333,6 @@ if __name__ == "__main__":
         print("You can still use embedding and search functionality without an API key.")
         print()
 
-    # Test code for examining header functions - Can be commented out for normal operation
-    # function_ranges = get_function_ranges("/home/david/repos/proto/components/mdns/private_include/mdns_utils.h")
-    # for func_name, (start_line, end_line, func_content) in function_ranges.items():
-    #     print(f"Function: {func_name} (lines {start_line}-{end_line})")
-    # exit()
-
-    # Example search
-    print("\nRunning example search...")
-    # full_search = full_text_search("mdns_init", "/home/david/repos/proto/components/mdns")
-    # print(full_search)
-    # exit()
-
     # Set paths from environment variables or use defaults
     original_code_path = os.environ.get("ORIGINAL_CODE_PATH", "/home/david/repos/proto/components/mdns_old")
     refactored_code_path = os.environ.get("REFACTORED_CODE_PATH", "/home/david/repos/proto/components/mdns")
@@ -422,15 +347,16 @@ if __name__ == "__main__":
 
     # Process both .c and .h files
     # Define file types to process
-    files_to_process = [ ] #os.path.join(original_code_path, 'mdns.c') ]
+    # files_to_process = [ ] #os.path.join(original_code_path, 'mdns.c') ]
+    files_to_process = [ os.path.join(original_code_path, 'mdns.c') ]
 
     # Add .c files
-    c_files = glob(os.path.join(original_code_path, '**/*.c'), recursive=True)
-    files_to_process.extend(c_files)
+    # c_files = glob(os.path.join(original_code_path, '**/*.c'), recursive=True)
+    # files_to_process.extend(c_files)
 
     # # Add .h files
-    h_files = glob(os.path.join(original_code_path, '**/*.h'), recursive=True)
-    files_to_process.extend(h_files)
+    # h_files = glob(os.path.join(original_code_path, '**/*.h'), recursive=True)
+    # files_to_process.extend(h_files)
 
     # Keep track of all mappings
     all_mappings = []
@@ -448,97 +374,35 @@ if __name__ == "__main__":
             # Create a Document for each function
             for func_name, (start_line, end_line, func_content) in function_ranges.items():
                 print(f"\nFunction(lines {start_line}-{end_line}): {func_name}")
-                # if func_name != "mdns_if_from_preset_if":
-                #     continue
+                if func_name != "_mdns_get_default_instance_name":
+                    continue
 
                 # Search for original function references
-                full_text = full_text_search(func_name, original_code_path)
-                original_context = f"""
-Please review the following refactoring of the function {func_name}. Mostly code structure changes and renaming.
-The below context shows the original function and the refactored code containing multiple functions that might replace the original function.
-Your goal is to find the actual refactored function. If unsure, please summarize what you learned and give follow up questions.
-In the next iteration, you can run contextual search or full-text search of the original and refactored code.
+                original_context = full_text_search(func_name, original_code_path)
 
-Format your response as follows:
-* If you have 95% confidence, just state the name of the function you think is the refactored function. If everything looks safe do not say anything else just the function name withing xml tags, for example:
-```xml
-<refactored_function>
-mdns_init
-</refactored_function>
-* If you have 95% confidence that the function the refactored one, but you have a concern, that a subtle bug might have been introduced, say the name of the function and the concern you have, for example:
-```xml
-<refactored_function>
-mdns_init
-</refactored_function>
-<concern>
-the new mdns_init function does not check if the pcb is not NULL.
-</concern>
-```
-* If you have 95% confidence that the original function is not present in the refactored code, just say empty xml tags:
-```xml
-<refactored_function>
-</refactored_function>
-```
-* If you have 95% confidence that the original function has been split into several functions, just say the refactored function names within xml tags:
-```xml
-<refactored_function>
-mdns_init_internal
-mdns_receiver_init
-</refactored_function>
-```
-* Otherwise, summarize what you have learned and give follow up questions and search queries, within xml tags, for example:
-```xml
-<summary>
-I learned that the function mdns_init might have been split into multiple functions, mdns_init_internal and mdns_receiver_init.
-Add more details here, to help the next reviewer understand why you think another search and reasoning is needed.
-</summary>
-<follow_up>
-You have to verify if mdns_init_internal and mdns_receiver_init are the replacements for the original function.
-</follow_up>
-<search_original>
-mdns_init
-</search_original>
-<search_refactored>
-mdns_init_internal
-mdns_receiver_init
-</search_refactored>
-```
-
-## Original function
-
-```c
-{func_content}
-```
-
-### Function references in the original codebase
-{full_text}
-
-"""
                 # Search for similar functions in the refactored codebase
                 docs, formatted_results = embedder.search_functions(func_content, 3)
-                context = ""
+                refactored_context = ""
                 function_names_and_lines = {}
 
                 # Create a dictionary mapping function names to their location information
                 for i, result in enumerate(formatted_results):
-                    context += result
+                    refactored_context += result
                     if i < len(docs):  # Safety check to avoid index errors
                         source_file1 = docs[i].metadata.get('source', '')
                         start_line1 = docs[i].metadata.get('start_line', '')
                         function_name1 = docs[i].metadata.get('function', '')
                         function_names_and_lines[function_name1] = f"{source_file1}:{start_line1}"
-                refactored_context = f"""
-### Refactored code
 
-{context}
-"""
-                # print(original_context)
-                # print(refactored_context)
-
-                # Create a reviewer and generate a response
+                # Create a reviewer and build the initial prompt
                 reviewer = Reviewer()
-                full_prompt = original_context + refactored_context
-                review_response = reviewer.generate_response(full_prompt)
+                initial_prompt = reviewer.build_initial_prompt(func_name, func_content, original_context, refactored_context, initial=True)
+                print("\n=== INITIAL PROMPT ===")
+                print(initial_prompt)
+                # exit()
+
+                # Generate the initial response
+                review_response = reviewer.generate_response(initial_prompt)
                 print("\n=== REVIEWER RESPONSE ===")
                 print(review_response)
 
@@ -546,7 +410,7 @@ mdns_receiver_init
                 if review_response.startswith("Error:"):
                     print("Received error response. Continuing to next function.")
 
-                    # Use the new function to write to file with ERROR marker
+                    # Use the function to write to file with ERROR marker
                     result_msg = write_mapping_to_file(
                         original_func_name=func_name,
                         refactored_func_name="ERROR",
@@ -558,24 +422,17 @@ mdns_receiver_init
                     )
                     print(result_msg)
                     all_mappings.append((func_name, "ERROR", None))
-
                     continue
 
-                # Post-process the reviewer's response to extract refactored function names
-                match = re.search(r'<refactored_function>(.*?)</refactored_function>', review_response, re.DOTALL)
+                # Parse the response
+                parsed_response = reviewer.parse_response(review_response)
+                refactored_func_names = parsed_response.get('refactored_function_names', [])
+                concern = parsed_response.get('concern')
 
-                # Extract concern if present
-                concern_match = re.search(r'<concern>(.*?)</concern>', review_response, re.DOTALL)
-                concern = concern_match.group(1).strip() if concern_match else None
-
-                if match:
-                    # We found a match! Process it
-                    content = match.group(1).strip()
-                    refactored_func_names = [name.strip() for name in content.split('\n') if name.strip()]
-
-                    # Process each refactored function name
+                # If we found refactored function names, process them
+                if refactored_func_names:
                     for refactored_name in refactored_func_names:
-                        # Use the new function to write to file
+                        # Write mapping to file
                         result_msg = write_mapping_to_file(
                             original_func_name=func_name,
                             refactored_func_name=refactored_name,
@@ -588,39 +445,14 @@ mdns_receiver_init
                         print(result_msg)
                         all_mappings.append((func_name, refactored_name, concern))
                 else:
-                    print("No refactored function found in the response. Continuing with next function.")
-                    # Now let's try to add additional context to the prompt
-                    summary = None
-                    search_original_terms = None
-                    search_refactored_terms = None
-                    follow_up_questions = None
+                    # We didn't find a confident answer, try additional iterations
+                    summary = parsed_response.get('summary')
+                    follow_up = parsed_response.get('follow_up')
+                    search_original = parsed_response.get('search_original')
+                    search_refactored = parsed_response.get('search_refactored')
 
-                    # Extract summary if available
-                    match = re.search(r'<summary>(.*?)</summary>', review_response, re.DOTALL)
-                    if match:
-                        summary = match.group(1).strip()
-                        print(f"Summary: {summary}")
-
-                    # Extract follow-up questions if available
-                    match = re.search(r'<follow_up>(.*?)</follow_up>', review_response, re.DOTALL)
-                    if match:
-                        follow_up_questions = match.group(1).strip()
-                        print(f"Follow-up questions: {follow_up_questions}")
-
-                    # Extract search terms for original code
-                    match = re.search(r'<search_original>(.*?)</search_original>', review_response, re.DOTALL)
-                    if match:
-                        search_original_terms = match.group(1).strip()
-                        print(f"Search terms for original code: {search_original_terms}")
-
-                    # Extract search terms for refactored code
-                    match = re.search(r'<search_refactored>(.*?)</search_refactored>', review_response, re.DOTALL)
-                    if match:
-                        search_refactored_terms = match.group(1).strip()
-                        print(f"Search terms for refactored code: {search_refactored_terms}")
-
-                    # If we have search terms, try up to 3 more iterations with additional context
-                    if summary and (search_original_terms or search_refactored_terms):
+                    # Try up to 3 more iterations with additional context if we have search terms
+                    if summary and (search_original or search_refactored):
                         max_retries = 3
                         retry_count = 0
 
@@ -628,73 +460,48 @@ mdns_receiver_init
                             retry_count += 1
                             print(f"\n=== RETRY ATTEMPT {retry_count}/{max_retries} ===")
 
-                            additional_context = f"""
-## Additional context from previous analysis
+                            # Search for additional context if needed
+                            original_search_results = None
+                            refactored_search_results = None
 
-### Summary of previous findings
-{summary}
+                            if search_original:
+                                original_search_results = full_text_search(search_original, original_code_path)
 
-"""
-                            # Add follow-up questions if available
-                            if follow_up_questions:
-                                additional_context += f"""
-### Questions to consider
-{follow_up_questions}
+                            if search_refactored:
+                                refactored_search_results = full_text_search(search_refactored, refactored_code_path)
 
-"""
+                            # Build the follow-up prompt
+                            initial_prompt = reviewer.build_initial_prompt(func_name, func_content, original_context, refactored_context, initial=False)
+                            follow_up_prompt = reviewer.build_follow_up_prompt(
+                                initial_prompt,
+                                summary,
+                                follow_up,
+                                original_search_results,
+                                refactored_search_results,
+                                search_original,
+                                search_refactored
+                            )
 
-                            # Search for original terms if provided
-                            if search_original_terms:
-                                original_search_results = full_text_search(search_original_terms, original_code_path)
-                                additional_context += f"""
-### Additional search results from original codebase for "{search_original_terms}"
-{original_search_results}
-
-"""
-
-                            # Search for refactored terms if provided
-                            if search_refactored_terms:
-                                refactored_search_results = full_text_search(search_refactored_terms, refactored_code_path)
-                                additional_context += f"""
-### Additional search results from refactored codebase for "{search_refactored_terms}"
-{refactored_search_results}
-
-"""
-
-                            # Add a reminder about the confidence requirement
-                            additional_context += """
-Based on this additional context, please reconsider your analysis and provide a more confident answer if possible.
-Remember, only use the <refactored_function> tag if you have 95% confidence in your determination.
-"""
-
-                            # Generate a new response with the additional context
-                            enhanced_prompt = full_prompt + additional_context
+                            # Generate a new response
                             print("Generating new response with additional context...")
-                            review_response = reviewer.generate_response(enhanced_prompt)
+                            review_response = reviewer.generate_response(follow_up_prompt)
                             print(f"\n=== REVIEWER RESPONSE (RETRY {retry_count}) ===")
                             print(review_response)
 
-                            # If we got an error response, check if we should continue or stop
+                            # Skip further processing if we got an error
                             if review_response.startswith("Error:"):
                                 print(f"Received error response on retry {retry_count}. Will try again in next iteration.")
-                                # Update the retry counter but continue with the loop
                                 continue
 
-                            # Check if we found a refactored function this time
-                            match = re.search(r'<refactored_function>(.*?)</refactored_function>', review_response, re.DOTALL)
+                            # Parse the new response
+                            parsed_response = reviewer.parse_response(review_response)
+                            refactored_func_names = parsed_response.get('refactored_function_names', [])
+                            concern = parsed_response.get('concern')
 
-                            # Extract concern if present
-                            concern_match = re.search(r'<concern>(.*?)</concern>', review_response, re.DOTALL)
-                            concern = concern_match.group(1).strip() if concern_match else None
-
-                            if match:
-                                # We found a match! Process it
-                                content = match.group(1).strip()
-                                refactored_func_names = [name.strip() for name in content.split('\n') if name.strip()]
-
-                                # Process each refactored function name
+                            # If we found refactored function names, process them
+                            if refactored_func_names:
                                 for refactored_name in refactored_func_names:
-                                    # Use the new function to write to file
+                                    # Write mapping to file
                                     result_msg = write_mapping_to_file(
                                         original_func_name=func_name,
                                         refactored_func_name=refactored_name,
@@ -707,43 +514,45 @@ Remember, only use the <refactored_function> tag if you have 95% confidence in y
                                     print(result_msg)
                                     all_mappings.append((func_name, refactored_name, concern))
 
-                                # Found a match, break out of the retry loop
+                                # Found an answer, break out of the retry loop
                                 break
 
-                            # Extract new information for the next iteration if needed
-                            new_summary = re.search(r'<summary>(.*?)</summary>', review_response, re.DOTALL)
-                            if new_summary:
-                                summary = new_summary.group(1).strip()
+                            # Update search terms for next iteration if needed
+                            summary = parsed_response.get('summary', summary)
+                            follow_up = parsed_response.get('follow_up', follow_up)
+                            search_original = parsed_response.get('search_original', search_original)
+                            search_refactored = parsed_response.get('search_refactored', search_refactored)
 
-                            new_follow_up = re.search(r'<follow_up>(.*?)</follow_up>', review_response, re.DOTALL)
-                            if new_follow_up:
-                                follow_up_questions = new_follow_up.group(1).strip()
-
-                            new_search_original = re.search(r'<search_original>(.*?)</search_original>', review_response, re.DOTALL)
-                            if new_search_original:
-                                search_original_terms = new_search_original.group(1).strip()
-
-                            new_search_refactored = re.search(r'<search_refactored>(.*?)</search_refactored>', review_response, re.DOTALL)
-                            if new_search_refactored:
-                                search_refactored_terms = new_search_refactored.group(1).strip()
-
-                        if retry_count >= max_retries:
+                        # If we still don't have an answer after max retries, mark as unknown
+                        if not refactored_func_names:
                             print(f"Maximum retry attempts ({max_retries}) reached without finding a confident mapping.")
+                            # Mark as unknown
+                            result_msg = write_mapping_to_file(
+                                original_func_name=func_name,
+                                refactored_func_name="???",
+                                original_file=os.path.relpath(file_path, original_code_path),
+                                original_line=start_line,
+                                output_format=output_format,
+                                function_locations=function_names_and_lines,
+                                concern=None
+                            )
+                            print(result_msg)
+                            all_mappings.append((func_name, "???", None))
                     else:
-                        print("No sufficient information for additional searches. Moving to next function.")
-
-                    # Use the new function to write to file with ??? marker
-                    result_msg = write_mapping_to_file(
-                        original_func_name=func_name,
-                        refactored_func_name="???",
-                        original_file=os.path.relpath(file_path, original_code_path),
-                        original_line=start_line,
-                        output_format=output_format,
-                        function_locations=function_names_and_lines,
-                        concern=None
-                    )
-                    print(result_msg)
-                    all_mappings.append((func_name, "???", None))
+                        # Not enough information for additional searches
+                        print("No sufficient information for additional searches. Marking as unknown.")
+                        # Mark as unknown
+                        result_msg = write_mapping_to_file(
+                            original_func_name=func_name,
+                            refactored_func_name="???",
+                            original_file=os.path.relpath(file_path, original_code_path),
+                            original_line=start_line,
+                            output_format=output_format,
+                            function_locations=function_names_and_lines,
+                            concern=None
+                        )
+                        print(result_msg)
+                        all_mappings.append((func_name, "???", None))
 
         except Exception as e:
             print(f"Error processing {file_path}: {e}")
@@ -765,15 +574,3 @@ Remember, only use the <refactored_function> tag if you have 95% confidence in y
             print(f"Mappings saved in {output_format} format")
     else:
         print("No refactoring mappings were found.")
-
-    # Interactive mode example code (commented out)
-    # while True:
-    #     user_query = input("\nEnter a search query (or 'q' to quit): ")
-    #     if user_query.lower() == 'q':
-    #         break
-    #     num_results = input("How many results? [5]: ")
-    #     try:
-    #         num_results = int(num_results) if num_results else 5
-    #     except ValueError:
-    #         num_results = 5
-    #     docs, formatted_results = embedder.search_functions(user_query, num_results)
